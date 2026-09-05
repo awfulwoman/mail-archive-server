@@ -237,6 +237,56 @@ def test_post_sync_missing_auth_401(env):
     assert resp.status_code == 401
 
 
+def test_never_successfully_synced_account_still_visible_in_status_and_accounts(tmp_path):
+    """A configured account whose sync has NEVER once succeeded — wrong password,
+    unreachable host — must not be invisible just because it never produced a
+    directory to discover. Its failure needs to be visible, not silent."""
+    maildir = tmp_path / "maildir"
+    maildir.mkdir()
+    mbsync_bin = install_fake_mbsync(tmp_path)
+    marker_dir = tmp_path / "fake_mbsync_markers"
+    marker_dir.mkdir()
+    (marker_dir / "personal.fail").touch()  # never succeeds, never creates a dir
+
+    config = load_config({
+        "MAIL_ARCHIVE_MAILDIR_PATH": str(maildir),
+        "MAIL_ARCHIVE_TOKENS__wildcard__SECRET": "wildcard-secret",
+        "MAIL_ARCHIVE_TOKENS__wildcard__ACCOUNTS": "*",
+        "MAIL_ARCHIVE_MBSYNC_BIN": str(mbsync_bin),
+        "MAIL_ARCHIVE_MBSYNCRC_PATH": str(tmp_path / "mbsyncrc"),
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__HOST": "imap.example.com",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__USERNAME": "u",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__PASSWORD": "p",
+    })
+    conn = open_db(Path(":memory:"))
+    from mail_archive_server.pipeline import sync_and_reindex
+    sync_and_reindex(conn, config)
+
+    client = TestClient(create_app(config, conn, maildir))
+
+    accounts_resp = client.get("/accounts", headers=auth("wildcard-secret")).json()
+    assert accounts_resp["accounts"] == [{
+        "name": "personal",
+        "messages": 0,
+        "folders": 0,
+        "unseen": 0,
+        "last_sync_attempt_at": accounts_resp["accounts"][0]["last_sync_attempt_at"],
+        "last_sync_ok": False,
+        "last_indexed_at": None,
+        "stale_seconds": accounts_resp["accounts"][0]["stale_seconds"],
+    }]
+    assert accounts_resp["accounts"][0]["last_sync_attempt_at"] is not None
+
+    status_resp = client.get("/status", headers=auth("wildcard-secret")).json()
+    assert {a["name"] for a in status_resp["accounts"]} == {"personal"}
+
+    # Searching it explicitly must not 400 as "unknown" — it IS a real,
+    # configured account, just one with nothing indexed yet.
+    search_resp = client.get("/messages", params={"account": "personal"}, headers=auth("wildcard-secret"))
+    assert search_resp.status_code == 200
+    assert search_resp.json()["total"] == 0
+
+
 def test_scheduler_syncs_promptly_on_startup_when_enabled(tmp_path):
     import time
 
@@ -296,7 +346,11 @@ def test_scheduler_not_started_by_default(tmp_path):
     with TestClient(app) as client:
         time.sleep(0.3)
         resp = client.get("/accounts", headers=auth("wildcard-secret"))
-        assert resp.json()["accounts"] == []
+        # "personal" is configured, so it's listed — but nothing ever synced it.
+        [acct] = resp.json()["accounts"]
+        assert acct["name"] == "personal"
+        assert acct["last_sync_attempt_at"] is None
+        assert acct["last_sync_ok"] is None
     assert not config.mbsyncrc_path.exists()
 
 

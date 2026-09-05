@@ -45,6 +45,17 @@ def _account_sync_status(conn: sqlite3.Connection, account: str) -> tuple[str | 
     return attempted_at, ok
 
 
+def _all_accounts(request: Request) -> set[str]:
+    """The full account universe: accounts with something indexed, UNION accounts
+    configured to sync. An account whose sync has never once succeeded — wrong
+    password, unreachable host — never produces a directory to discover, so
+    relying on known_accounts() (indexed only) would make it invisible even
+    though its failure is genuinely recorded."""
+    conn: sqlite3.Connection = request.app.state.conn
+    config: Config = request.app.state.config
+    return known_accounts(conn) | set(config.imap_accounts.keys())
+
+
 def _account_summary(request: Request, account: str) -> dict:
     conn: sqlite3.Connection = request.app.state.conn
     stats = account_stats(conn, account)
@@ -74,7 +85,7 @@ async def get_status(request: Request) -> JSONResponse:
 
     conn: sqlite3.Connection = request.app.state.conn
     config: Config = request.app.state.config
-    allowed = sorted(a for a in known_accounts(conn) if token.allows(a))
+    allowed = sorted(a for a in _all_accounts(request) if token.allows(a))
     summaries = [_account_summary(request, a) for a in allowed]
     worst = max((s["stale_seconds"] for s in summaries if s["stale_seconds"] is not None), default=None)
 
@@ -92,8 +103,7 @@ async def get_accounts(request: Request) -> JSONResponse:
     if token is None:
         return _error(401, "unauthorized", "missing or invalid bearer token")
 
-    conn: sqlite3.Connection = request.app.state.conn
-    allowed = sorted(a for a in known_accounts(conn) if token.allows(a))
+    allowed = sorted(a for a in _all_accounts(request) if token.allows(a))
     return JSONResponse({"accounts": [_account_summary(request, a) for a in allowed]})
 
 
@@ -103,7 +113,7 @@ async def get_folders(request: Request) -> JSONResponse:
         return _error(401, "unauthorized", "missing or invalid bearer token")
 
     conn: sqlite3.Connection = request.app.state.conn
-    known = known_accounts(conn)
+    known = _all_accounts(request)
     requested = request.query_params.getlist("account")
 
     if requested:
@@ -120,8 +130,7 @@ async def get_folders(request: Request) -> JSONResponse:
 
 
 def _resolve_accounts(request: Request, token: Token) -> list[str] | JSONResponse:
-    conn: sqlite3.Connection = request.app.state.conn
-    known = known_accounts(conn)
+    known = _all_accounts(request)
     requested = request.query_params.getlist("account")
 
     if not requested:
