@@ -109,3 +109,87 @@ def test_mbsync_state_path_defaults_under_maildir():
 def test_mbsync_state_path_override():
     cfg = load_config(_env(MAIL_ARCHIVE_MBSYNC_STATE_PATH="/tmp/state"))
     assert str(cfg.mbsync_state_path) == "/tmp/state"
+
+
+def test_no_imap_accounts_by_default():
+    cfg = load_config(_env())
+    assert cfg.imap_accounts == {}
+
+
+def test_single_imap_account():
+    cfg = load_config(_env(
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__HOST="imap.example.com",
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__USERNAME="charlie@example.com",
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__PASSWORD="hunter2",
+    ))
+    assert set(cfg.imap_accounts) == {"personal"}
+    acct = cfg.imap_accounts["personal"]
+    assert acct.name == "personal"
+    assert acct.host == "imap.example.com"
+    assert acct.port == 993
+    assert acct.username == "charlie@example.com"
+    assert acct.password == "hunter2"
+    assert acct.patterns == "*"
+
+
+def test_imap_account_port_and_patterns_override():
+    cfg = load_config(_env(
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__work__HOST="imap.work.com",
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__work__PORT="994",
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__work__USERNAME="c@work.com",
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__work__PASSWORD="pw",
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__work__PATTERNS="* ![Gmail]/All Mail",
+    ))
+    acct = cfg.imap_accounts["work"]
+    assert acct.port == 994
+    assert acct.patterns == "* ![Gmail]/All Mail"
+
+
+def test_multiple_imap_accounts():
+    cfg = load_config(_env(
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__HOST="imap.example.com",
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__USERNAME="u1",
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__PASSWORD="p1",
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__work__HOST="imap.work.com",
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__work__USERNAME="u2",
+        MAIL_ARCHIVE_IMAP_ACCOUNTS__work__PASSWORD="p2",
+    ))
+    assert set(cfg.imap_accounts) == {"personal", "work"}
+
+
+def test_imap_account_missing_required_field_raises():
+    with pytest.raises(ConfigError):
+        load_config(_env(
+            MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__HOST="imap.example.com",
+            MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__USERNAME="u1",
+            # no PASSWORD
+        ))
+
+
+def test_imap_account_name_must_be_safe():
+    with pytest.raises(ConfigError):
+        load_config(_env(
+            **{
+                "MAIL_ARCHIVE_IMAP_ACCOUNTS__Bad Name__HOST": "imap.example.com",
+                "MAIL_ARCHIVE_IMAP_ACCOUNTS__Bad Name__USERNAME": "u1",
+                "MAIL_ARCHIVE_IMAP_ACCOUNTS__Bad Name__PASSWORD": "p1",
+            }
+        ))
+
+
+def test_sync_settings_defaults():
+    cfg = load_config(_env())
+    assert cfg.sync_interval_seconds == 3600
+    assert cfg.mbsync_bin == "mbsync"
+    assert str(cfg.mbsyncrc_path) == str(cfg.db_path.parent / "mbsyncrc")
+
+
+def test_sync_settings_overrides():
+    cfg = load_config(_env(
+        MAIL_ARCHIVE_SYNC_INTERVAL_SECONDS="60",
+        MAIL_ARCHIVE_MBSYNC_BIN="/usr/local/bin/mbsync",
+        MAIL_ARCHIVE_MBSYNCRC_PATH="/tmp/mbsyncrc",
+    ))
+    assert cfg.sync_interval_seconds == 60
+    assert cfg.mbsync_bin == "/usr/local/bin/mbsync"
+    assert str(cfg.mbsyncrc_path) == "/tmp/mbsyncrc"

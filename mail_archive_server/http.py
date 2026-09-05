@@ -1,6 +1,8 @@
 from __future__ import annotations
+import asyncio
 import sqlite3
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -8,6 +10,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from mail_archive_server.config import Config, Token
 from mail_archive_server.indexer import reindex as run_reindex
+from mail_archive_server.pipeline import sync_and_reindex
 from mail_archive_server.store import (
     SearchFilters,
     account_stats,
@@ -17,7 +20,7 @@ from mail_archive_server.store import (
     known_accounts,
     search,
 )
-from mail_archive_server.timeutil import mtime_to_utc, normalize_since, normalize_until, stale_seconds
+from mail_archive_server.timeutil import normalize_since, normalize_until, stale_seconds
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -33,34 +36,30 @@ def _get_token(request: Request) -> Token | None:
     return config.token_for_secret(secret)
 
 
-def _account_last_sync_at(mbsync_state_path: Path, account: str) -> str | None:
-    d = mbsync_state_path / account
-    if not d.is_dir():
-        return None
-    newest: float | None = None
-    for f in d.iterdir():
-        if f.is_file():
-            m = f.stat().st_mtime
-            if newest is None or m > newest:
-                newest = m
-    return mtime_to_utc(newest) if newest is not None else None
+def _account_sync_status(conn: sqlite3.Connection, account: str) -> tuple[str | None, bool | None]:
+    """The service performs its own sync now, so this is tracked directly in the
+    index rather than inferred from mbsync SyncState file mtimes."""
+    attempted_at = get_meta(conn, f"last_sync_attempt_at:{account}")
+    ok_raw = get_meta(conn, f"last_sync_ok:{account}")
+    ok = None if ok_raw is None else ok_raw == "1"
+    return attempted_at, ok
 
 
 def _account_summary(request: Request, account: str) -> dict:
     conn: sqlite3.Connection = request.app.state.conn
-    config: Config = request.app.state.config
     stats = account_stats(conn, account)
     last_indexed_at = get_meta(conn, f"last_indexed_at:{account}")
-    last_sync_at = _account_last_sync_at(config.mbsync_state_path, account)
+    last_sync_attempt_at, last_sync_ok = _account_sync_status(conn, account)
     folders = folder_counts(conn, [account])
     return {
         "name": account,
         "messages": stats["messages"],
         "folders": len(folders),
         "unseen": stats["unseen"],
-        "last_sync_at": last_sync_at,
+        "last_sync_attempt_at": last_sync_attempt_at,
+        "last_sync_ok": last_sync_ok,
         "last_indexed_at": last_indexed_at,
-        "stale_seconds": stale_seconds(last_sync_at),
+        "stale_seconds": stale_seconds(last_sync_attempt_at),
     }
 
 
@@ -185,10 +184,9 @@ async def get_messages(request: Request) -> JSONResponse:
     result = search(request.app.state.conn, filters)
 
     conn: sqlite3.Connection = request.app.state.conn
-    config: Config = request.app.state.config
     last_indexed = [get_meta(conn, f"last_indexed_at:{a}") for a in accounts]
     last_indexed = [x for x in last_indexed if x]
-    sync_ats = [_account_last_sync_at(config.mbsync_state_path, a) for a in accounts]
+    sync_ats = [_account_sync_status(conn, a)[0] for a in accounts]
     sync_ats = [x for x in sync_ats if x]
     worst_stale = max((stale_seconds(s) for s in sync_ats), default=None)
 
@@ -240,16 +238,68 @@ async def post_reindex(request: Request) -> JSONResponse:
     return JSONResponse({"indexing": True}, status_code=202)
 
 
-def create_app(config: Config, conn: sqlite3.Connection, maildir_root: Path) -> Starlette:
-    app = Starlette(routes=[
-        Route("/health", health),
-        Route("/status", get_status),
-        Route("/accounts", get_accounts),
-        Route("/folders", get_folders),
-        Route("/messages", get_messages),
-        Route("/messages/{id}", get_message_detail),
-        Route("/reindex", post_reindex, methods=["POST"]),
-    ])
+def do_sync(app_state) -> None:
+    """Runs the full sync-then-reindex pipeline. Shared by the /sync handler and
+    main.py's background scheduler, under the same lock post_reindex uses — sync
+    and reindex must never run concurrently with each other."""
+    with app_state.indexing_lock:
+        app_state.indexing = True
+        try:
+            sync_and_reindex(app_state.conn, app_state.config)
+        finally:
+            app_state.indexing = False
+
+
+async def post_sync(request: Request) -> JSONResponse:
+    token = _get_token(request)
+    if token is None:
+        return _error(401, "unauthorized", "missing or invalid bearer token")
+    if token.accounts is not None:
+        return _error(403, "sync_forbidden", "sync requires a wildcard-scoped token")
+
+    do_sync(request.app.state)
+    return JSONResponse({"indexing": True}, status_code=202)
+
+
+async def _scheduler_loop(app: Starlette) -> None:
+    """Syncs promptly on startup, then again every sync_interval_seconds — never
+    waiting out a full interval before the first attempt. Runs the blocking
+    sync/reindex work in a thread so it never blocks the event loop serving
+    concurrent HTTP requests."""
+    while True:
+        await asyncio.to_thread(do_sync, app.state)
+        await asyncio.sleep(app.state.config.sync_interval_seconds)
+
+
+@asynccontextmanager
+async def _lifespan(app: Starlette):
+    task = asyncio.create_task(_scheduler_loop(app))
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+def create_app(
+    config: Config, conn: sqlite3.Connection, maildir_root: Path, *, run_scheduler: bool = False
+) -> Starlette:
+    app = Starlette(
+        routes=[
+            Route("/health", health),
+            Route("/status", get_status),
+            Route("/accounts", get_accounts),
+            Route("/folders", get_folders),
+            Route("/messages", get_messages),
+            Route("/messages/{id}", get_message_detail),
+            Route("/reindex", post_reindex, methods=["POST"]),
+            Route("/sync", post_sync, methods=["POST"]),
+        ],
+        lifespan=_lifespan if run_scheduler else None,
+    )
     app.state.config = config
     app.state.conn = conn
     app.state.maildir_root = maildir_root

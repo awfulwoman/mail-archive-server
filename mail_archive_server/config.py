@@ -1,7 +1,10 @@
 from __future__ import annotations
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 class ConfigError(Exception):
@@ -19,6 +22,16 @@ class Token:
 
 
 @dataclass(frozen=True)
+class IMAPAccountConfig:
+    name: str
+    host: str
+    port: int
+    username: str
+    password: str
+    patterns: str = "*"
+
+
+@dataclass(frozen=True)
 class Config:
     maildir_path: Path
     db_path: Path
@@ -28,6 +41,10 @@ class Config:
     exclude_folders_global: frozenset[str]
     exclude_folders_by_account: dict[str, frozenset[str]] = field(default_factory=dict)
     mbsync_state_path: Path = field(default=None)  # type: ignore[assignment]
+    imap_accounts: dict[str, IMAPAccountConfig] = field(default_factory=dict)
+    sync_interval_seconds: int = 3600
+    mbsync_bin: str = "mbsync"
+    mbsyncrc_path: Path = field(default=None)  # type: ignore[assignment]
 
     def token_for_secret(self, secret: str) -> Token | None:
         for t in self.tokens:
@@ -68,6 +85,44 @@ def _parse_tokens(env: dict[str, str]) -> tuple[Token, ...]:
     return tuple(tokens)
 
 
+def _parse_imap_accounts(env: dict[str, str]) -> dict[str, IMAPAccountConfig]:
+    prefix = "MAIL_ARCHIVE_IMAP_ACCOUNTS__"
+    fields: dict[str, dict[str, str]] = {}
+    for key, value in env.items():
+        if not key.startswith(prefix):
+            continue
+        rest = key[len(prefix):]
+        for suffix in ("HOST", "PORT", "USERNAME", "PASSWORD", "PATTERNS"):
+            marker = f"__{suffix}"
+            if rest.endswith(marker):
+                name = rest[: -len(marker)]
+                fields.setdefault(name, {})[suffix] = value
+                break
+
+    accounts: dict[str, IMAPAccountConfig] = {}
+    for name, f in fields.items():
+        if not _SAFE_NAME.match(name):
+            raise ConfigError(
+                f"IMAP account name '{name}' must match ^[a-z0-9][a-z0-9_-]*$ — it "
+                f"becomes a Maildir directory and an mbsync channel name."
+            )
+        missing = {"HOST", "USERNAME", "PASSWORD"} - f.keys()
+        if missing:
+            raise ConfigError(
+                f"MAIL_ARCHIVE_IMAP_ACCOUNTS__{name}__* is missing required field(s): "
+                f"{', '.join(sorted(missing))}"
+            )
+        accounts[name] = IMAPAccountConfig(
+            name=name,
+            host=f["HOST"],
+            port=int(f.get("PORT", "993")),
+            username=f["USERNAME"],
+            password=f["PASSWORD"],
+            patterns=f.get("PATTERNS", "*"),
+        )
+    return accounts
+
+
 def _parse_exclude_folders(raw: str) -> tuple[frozenset[str], dict[str, frozenset[str]]]:
     global_: set[str] = set()
     by_account: dict[str, set[str]] = {}
@@ -105,6 +160,10 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     )
 
     mbsync_state_path = Path(env.get("MAIL_ARCHIVE_MBSYNC_STATE_PATH", str(maildir_path / ".mbsync")))
+    imap_accounts = _parse_imap_accounts(env)
+    sync_interval_seconds = int(env.get("MAIL_ARCHIVE_SYNC_INTERVAL_SECONDS", "3600"))
+    mbsync_bin = env.get("MAIL_ARCHIVE_MBSYNC_BIN", "mbsync")
+    mbsyncrc_path = Path(env.get("MAIL_ARCHIVE_MBSYNCRC_PATH", str(db_path.parent / "mbsyncrc")))
 
     return Config(
         maildir_path=maildir_path,
@@ -115,4 +174,8 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         exclude_folders_global=exclude_global,
         exclude_folders_by_account=exclude_by_account,
         mbsync_state_path=mbsync_state_path,
+        imap_accounts=imap_accounts,
+        sync_interval_seconds=sync_interval_seconds,
+        mbsync_bin=mbsync_bin,
+        mbsyncrc_path=mbsyncrc_path,
     )

@@ -1,7 +1,9 @@
 from __future__ import annotations
+import time
 from pathlib import Path
 from starlette.testclient import TestClient
 from mail_archive_server.main import bootstrap
+from tests.conftest import install_fake_mbsync
 
 
 def _make_folder(root: Path, *parts: str) -> Path:
@@ -30,6 +32,58 @@ def test_bootstrap_indexes_at_startup(tmp_path):
     assert resp.status_code == 200
     assert resp.json()["total"] == 1
     assert resp.json()["messages"][0]["subject"] == "Startup test"
+
+
+def test_bootstrap_run_scheduler_forwards_to_create_app(tmp_path):
+    maildir = tmp_path / "maildir"
+    maildir.mkdir()
+    mbsync_bin = install_fake_mbsync(tmp_path)
+    (tmp_path / "maildir_path.txt").write_text(str(maildir))
+
+    app = bootstrap({
+        "MAIL_ARCHIVE_MAILDIR_PATH": str(maildir),
+        "MAIL_ARCHIVE_DB_PATH": str(tmp_path / "index.db"),
+        "MAIL_ARCHIVE_TOKENS__gateway__SECRET": "s1",
+        "MAIL_ARCHIVE_MBSYNC_BIN": str(mbsync_bin),
+        "MAIL_ARCHIVE_MBSYNCRC_PATH": str(tmp_path / "mbsyncrc"),
+        "MAIL_ARCHIVE_SYNC_INTERVAL_SECONDS": "3600",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__HOST": "imap.example.com",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__USERNAME": "u",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__PASSWORD": "p",
+    }, run_scheduler=True)
+
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 3
+        total = 0
+        while time.monotonic() < deadline:
+            total = client.get("/messages", headers={"Authorization": "Bearer s1"}).json()["total"]
+            if total == 1:
+                break
+            time.sleep(0.05)
+        assert total == 1
+
+
+def test_bootstrap_run_scheduler_defaults_to_false(tmp_path):
+    maildir = tmp_path / "maildir"
+    maildir.mkdir()
+    mbsync_bin = install_fake_mbsync(tmp_path)
+    (tmp_path / "maildir_path.txt").write_text(str(maildir))
+    mbsyncrc_path = tmp_path / "mbsyncrc"
+
+    app = bootstrap({
+        "MAIL_ARCHIVE_MAILDIR_PATH": str(maildir),
+        "MAIL_ARCHIVE_DB_PATH": str(tmp_path / "index.db"),
+        "MAIL_ARCHIVE_TOKENS__gateway__SECRET": "s1",
+        "MAIL_ARCHIVE_MBSYNC_BIN": str(mbsync_bin),
+        "MAIL_ARCHIVE_MBSYNCRC_PATH": str(mbsyncrc_path),
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__HOST": "imap.example.com",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__USERNAME": "u",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__PASSWORD": "p",
+    })
+
+    with TestClient(app):
+        time.sleep(0.3)
+    assert not mbsyncrc_path.exists()
 
 
 def test_bootstrap_uses_configured_host_and_port(tmp_path):

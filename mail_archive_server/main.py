@@ -9,18 +9,18 @@ from mail_archive_server.store import open_db
 logger = logging.getLogger("mail_archive_server")
 
 
-def bootstrap(env: dict[str, str] | None = None) -> Starlette:
+def bootstrap(env: dict[str, str] | None = None, *, run_scheduler: bool = False) -> Starlette:
     config = load_config(env)
     conn = open_db(config.db_path)
     logger.info("indexing %s at startup", config.maildir_path)
     reindex(conn, config.maildir_path)
-    return create_app(config, conn, config.maildir_path)
+    return create_app(config, conn, config.maildir_path, run_scheduler=run_scheduler)
 
 
 def main() -> None:
     import uvicorn
     logging.basicConfig(level=logging.INFO)
-    app = bootstrap()
+    app = bootstrap(run_scheduler=True)
     config = app.state.config
     uvicorn.run(app, host=config.host, port=config.port)
 
