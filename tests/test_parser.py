@@ -61,6 +61,14 @@ def test_rfc2047_encoded_subject_and_from_name_decoded():
     assert m.subject == "Tést subject"
 
 
+def test_header_with_bogus_charset_label_falls_back_instead_of_crashing():
+    # "unknown-8bit" is a charset label some MTAs really emit; Python has no
+    # such codec, so a naive .decode() raises LookupError and kills the reindex.
+    raw = _msg("Subject: =?unknown-8bit?Q?caf=E9_r=E9sum=E9?=", "body")
+    m = parse_message(raw)
+    assert m.subject == "café résumé"
+
+
 def test_missing_message_id_is_empty_string():
     raw = _msg("From: a@b.com\nSubject: x", "body")
     m = parse_message(raw)

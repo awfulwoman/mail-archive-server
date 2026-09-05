@@ -29,7 +29,14 @@ def _decode_header_value(raw: str | None) -> str:
     out = []
     for text, enc in decode_header(raw):
         if isinstance(text, bytes):
-            out.append(text.decode(enc or "utf-8", errors="replace"))
+            try:
+                out.append(text.decode(enc or "utf-8", errors="replace"))
+            except LookupError:
+                # Some MTAs stamp a bogus charset label such as "unknown-8bit"
+                # on an encoded-word; Python has no such codec and .decode()
+                # raises. latin-1 maps every byte and never raises, so it is a
+                # safe last resort — a garbled header beats a crashed reindex.
+                out.append(text.decode("latin-1", errors="replace"))
         else:
             out.append(text)
     return "".join(out)
