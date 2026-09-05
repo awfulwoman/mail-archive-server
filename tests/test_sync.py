@@ -62,9 +62,33 @@ def test_sync_all_reports_per_account_success(tmp_path):
     mbsyncrc = tmp_path / "mbsyncrc"
     mbsyncrc.write_text("fake config")
 
-    results = sync_all([_account("personal")], mbsync_bin=str(mbsync_bin), mbsyncrc_path=mbsyncrc)
+    results = sync_all(
+        [_account("personal")],
+        mbsync_bin=str(mbsync_bin),
+        mbsyncrc_path=mbsyncrc,
+        maildir_path=tmp_path / "mail",
+    )
     assert results["personal"].ok is True
     assert results["personal"].exit_code == 0
+
+
+def test_sync_all_creates_account_maildir_and_syncstate_dirs(tmp_path):
+    mbsync_bin = _install_fake_mbsync(tmp_path)
+    mbsyncrc = tmp_path / "mbsyncrc"
+    mbsyncrc.write_text("fake config")
+    maildir = tmp_path / "mail"
+
+    sync_all(
+        [_account("personal")],
+        mbsync_bin=str(mbsync_bin),
+        mbsyncrc_path=mbsyncrc,
+        maildir_path=maildir,
+    )
+
+    # mbsync cannot open a store whose root dir does not exist; a fresh account
+    # has neither the store dir nor its SyncState dir until sync makes them.
+    assert (maildir / "personal").is_dir()
+    assert (maildir / ".mbsync" / "personal").is_dir()
 
 
 def test_sync_all_one_account_failing_does_not_stop_others(tmp_path):
@@ -76,7 +100,10 @@ def test_sync_all_one_account_failing_does_not_stop_others(tmp_path):
     (marker_dir / "work.fail").touch()
 
     results = sync_all(
-        [_account("personal"), _account("work")], mbsync_bin=str(mbsync_bin), mbsyncrc_path=mbsyncrc
+        [_account("personal"), _account("work")],
+        mbsync_bin=str(mbsync_bin),
+        mbsyncrc_path=mbsyncrc,
+        maildir_path=tmp_path / "mail",
     )
     assert results["personal"].ok is True
     assert results["work"].ok is False
@@ -91,4 +118,12 @@ def test_sync_all_empty_accounts_returns_empty(tmp_path):
     mbsync_bin = _install_fake_mbsync(tmp_path)
     mbsyncrc = tmp_path / "mbsyncrc"
     mbsyncrc.write_text("fake config")
-    assert sync_all([], mbsync_bin=str(mbsync_bin), mbsyncrc_path=mbsyncrc) == {}
+    assert (
+        sync_all(
+            [],
+            mbsync_bin=str(mbsync_bin),
+            mbsyncrc_path=mbsyncrc,
+            maildir_path=tmp_path / "mail",
+        )
+        == {}
+    )

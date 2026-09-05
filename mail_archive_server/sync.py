@@ -57,7 +57,16 @@ class SyncResult:
         return self.exit_code == 0
 
 
-def run_account_sync(account: str, mbsync_bin: str, mbsyncrc_path: Path) -> SyncResult:
+def run_account_sync(
+    account: str, mbsync_bin: str, mbsyncrc_path: Path, maildir_path: Path
+) -> SyncResult:
+    # mbsync's `Create Near` creates mailboxes within the store, but never the
+    # store root or the SyncState directory themselves — both must already
+    # exist or mbsync exits with "cannot open store". On a fresh account
+    # nothing has created them yet, so do it here.
+    (maildir_path / account).mkdir(parents=True, exist_ok=True)
+    (maildir_path / ".mbsync" / account).mkdir(parents=True, exist_ok=True)
+
     proc = subprocess.run(
         [mbsync_bin, "-c", str(mbsyncrc_path), "-V", account],
         capture_output=True,
@@ -67,9 +76,10 @@ def run_account_sync(account: str, mbsync_bin: str, mbsyncrc_path: Path) -> Sync
 
 
 def sync_all(
-    accounts: list[IMAPAccountConfig], mbsync_bin: str, mbsyncrc_path: Path
+    accounts: list[IMAPAccountConfig], mbsync_bin: str, mbsyncrc_path: Path, maildir_path: Path
 ) -> dict[str, SyncResult]:
     """Runs each account in turn; one account failing never stops the others."""
     return {
-        acct.name: run_account_sync(acct.name, mbsync_bin, mbsyncrc_path) for acct in accounts
+        acct.name: run_account_sync(acct.name, mbsync_bin, mbsyncrc_path, maildir_path)
+        for acct in accounts
     }

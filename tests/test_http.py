@@ -239,14 +239,14 @@ def test_post_sync_missing_auth_401(env):
 
 def test_never_successfully_synced_account_still_visible_in_status_and_accounts(tmp_path):
     """A configured account whose sync has NEVER once succeeded — wrong password,
-    unreachable host — must not be invisible just because it never produced a
-    directory to discover. Its failure needs to be visible, not silent."""
+    unreachable host — must still be visible in /accounts and /status, and its
+    failure must be reported (last_sync_ok False), not silent."""
     maildir = tmp_path / "maildir"
     maildir.mkdir()
     mbsync_bin = install_fake_mbsync(tmp_path)
     marker_dir = tmp_path / "fake_mbsync_markers"
     marker_dir.mkdir()
-    (marker_dir / "personal.fail").touch()  # never succeeds, never creates a dir
+    (marker_dir / "personal.fail").touch()  # mbsync always exits non-zero
 
     config = load_config({
         "MAIL_ARCHIVE_MAILDIR_PATH": str(maildir),
@@ -264,6 +264,9 @@ def test_never_successfully_synced_account_still_visible_in_status_and_accounts(
 
     client = TestClient(create_app(config, conn, maildir))
 
+    # The sync attempt creates the (empty) account store dir before invoking
+    # mbsync, so reindex discovers it — last_indexed_at is set, message counts
+    # are still zero.
     accounts_resp = client.get("/accounts", headers=auth("wildcard-secret")).json()
     assert accounts_resp["accounts"] == [{
         "name": "personal",
@@ -272,7 +275,7 @@ def test_never_successfully_synced_account_still_visible_in_status_and_accounts(
         "unseen": 0,
         "last_sync_attempt_at": accounts_resp["accounts"][0]["last_sync_attempt_at"],
         "last_sync_ok": False,
-        "last_indexed_at": None,
+        "last_indexed_at": accounts_resp["accounts"][0]["last_indexed_at"],
         "stale_seconds": accounts_resp["accounts"][0]["stale_seconds"],
     }]
     assert accounts_resp["accounts"][0]["last_sync_attempt_at"] is not None

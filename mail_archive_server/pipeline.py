@@ -21,7 +21,10 @@ def sync_and_reindex(conn: sqlite3.Connection, config: Config) -> PipelineResult
         content = generate_mbsyncrc(list(config.imap_accounts.values()), config.maildir_path)
         write_mbsyncrc(config.mbsyncrc_path, content)
         sync_results = sync_all(
-            list(config.imap_accounts.values()), config.mbsync_bin, config.mbsyncrc_path
+            list(config.imap_accounts.values()),
+            config.mbsync_bin,
+            config.mbsyncrc_path,
+            config.maildir_path,
         )
         attempted_at = now_utc()
         for name, result in sync_results.items():
