@@ -8,7 +8,14 @@ from mail_archive_server.config import IMAPAccountConfig
 def generate_mbsyncrc(accounts: list[IMAPAccountConfig], maildir_path: Path) -> str:
     """One Account/Store/Channel block per account, each with its OWN SyncState
     directory — mbsync's state files are named by mailbox with no channel prefix,
-    so two accounts sharing one directory would corrupt each other's sync state."""
+    so two accounts sharing one directory would corrupt each other's sync state.
+
+    `Sync Pull`: this is an archive. mbsync only ever pulls server -> local and
+    must never write to the source mailbox. Without it mbsync defaults to
+    `Sync All` (bidirectional), which would push any local-only message — e.g.
+    mail imported into the Maildir from another backup — back up to the live
+    account. With `Sync Pull` plus `Expunge None`, local-only messages are left
+    entirely alone: never pushed, never deleted."""
     blocks = []
     for acct in accounts:
         blocks.append(
@@ -32,6 +39,7 @@ def generate_mbsyncrc(accounts: list[IMAPAccountConfig], maildir_path: Path) -> 
             f"Far :{acct.name}-remote:\n"
             f"Near :{acct.name}-local:\n"
             f"Patterns {acct.patterns}\n"
+            f"Sync Pull\n"
             f"Create Near\n"
             f"Expunge None\n"
             f"SyncState {maildir_path}/.mbsync/{acct.name}/\n"

@@ -26,6 +26,18 @@ def test_generate_mbsyncrc_single_account():
     assert "Channel personal" in content
     assert "Expunge None" in content
     assert "Patterns *" in content
+    assert "Sync Pull" in content
+
+
+def test_generate_mbsyncrc_is_pull_only_never_pushes_to_the_server():
+    # This is an archive: mbsync must only pull server -> local. "Sync Pull"
+    # (not the default "Sync All") is what stops a local-only message — e.g.
+    # mail imported from another backup — being pushed up to the live account.
+    content = generate_mbsyncrc([_account("personal")], maildir_path=Path("/data/mail"))
+    assert "Sync Pull" in content
+    assert "Sync All" not in content
+    assert "Sync Push" not in content
+    assert "Sync Both" not in content
 
 
 def test_generate_mbsyncrc_multiple_accounts_each_own_syncstate():
