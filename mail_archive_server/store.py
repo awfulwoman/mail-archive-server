@@ -230,12 +230,22 @@ class SearchFilters:
     limit: int = 25
     offset: int = 0
     order: str = "date_desc"
+    # Keyset position (date_utc, id): rows strictly after this, in `order`.
+    # Set from a decoded cursor (mail_archive_server.cursor); excluded from
+    # the cursor's own filter fingerprint since it changes every page of
+    # the same walk.
+    after: tuple[str, str] | None = None
 
 
 @dataclass
 class SearchResult:
     messages: list[dict]
     total: int
+    # The (date_utc, id) of the last row returned, to seed the next page's
+    # cursor -- None once the range is exhausted, or whenever `order` is
+    # "relevance" (keyset pagination needs a total order; relevance isn't
+    # one -- see mail-archive-server#2).
+    next_position: tuple[str, str] | None = None
 
 
 def search(conn: sqlite3.Connection, f: SearchFilters) -> SearchResult:
