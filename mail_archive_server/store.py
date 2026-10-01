@@ -301,6 +301,12 @@ def search(conn: sqlite3.Connection, f: SearchFilters) -> SearchResult:
         where.append("m.attachments LIKE ?")
         params.append(f"%{f.attachment_name}%")
 
+    if f.after is not None and f.order in ("date_asc", "date_desc"):
+        after_date, after_id = f.after
+        op = ">" if f.order == "date_asc" else "<"
+        where.append(f"(m.date_utc {op} ? OR (m.date_utc = ? AND m.id {op} ?))")
+        params.extend([after_date, after_date, after_id])
+
     from_clause = "FROM messages m"
     if f.q:
         from_clause = "FROM messages m JOIN messages_fts ON messages_fts.id = m.id"
@@ -313,16 +319,29 @@ def search(conn: sqlite3.Connection, f: SearchFilters) -> SearchResult:
         f"SELECT COUNT(*) AS n {from_clause} WHERE {where_sql}", params
     ).fetchone()["n"]
 
+    # id is a tiebreaker in both the ORDER BY and the `after` clause above --
+    # without it, two rows sharing a date_utc have no guaranteed stable
+    # order across calls, which would break "exactly once" keyset walking.
+    keyset_order = f.order in ("date_asc", "date_desc")
     if f.order == "relevance" and f.q:
         order_sql = "ORDER BY bm25(messages_fts) ASC"
     elif f.order == "date_asc":
-        order_sql = "ORDER BY m.date_utc ASC"
+        order_sql = "ORDER BY m.date_utc ASC, m.id ASC"
     else:
-        order_sql = "ORDER BY m.date_utc DESC"
+        order_sql = "ORDER BY m.date_utc DESC, m.id DESC"
 
+    # One extra row, only for keyset-orderable queries, to know for certain
+    # whether more remain -- next_position must be exact ("null once the
+    # range is exhausted"), not a guess from whether this page happened to
+    # be full.
+    fetch_limit = f.limit + 1 if keyset_order else f.limit
     rows = conn.execute(
         f"SELECT m.* {from_clause} WHERE {where_sql} {order_sql} LIMIT ? OFFSET ?",
-        [*params, f.limit, f.offset],
+        [*params, fetch_limit, f.offset],
     ).fetchall()
 
-    return SearchResult(messages=[_row_to_dict(r) for r in rows], total=total)
+    page_rows = rows[: f.limit]
+    has_more = keyset_order and len(rows) > f.limit
+    next_position = (page_rows[-1]["date_utc"], page_rows[-1]["id"]) if has_more and page_rows else None
+
+    return SearchResult(messages=[_row_to_dict(r) for r in page_rows], total=total, next_position=next_position)

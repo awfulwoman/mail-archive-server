@@ -362,3 +362,97 @@ def test_search_pagination_total_reflects_full_match_count(db):
 
     page2 = search(db, SearchFilters(accounts=["personal"], limit=2, offset=2, order="date_asc"))
     assert page2.messages[0]["date"] == "2026-09-03T00:00:00Z"
+
+
+def test_next_position_is_set_when_more_rows_remain(db):
+    for i in range(5):
+        _insert(db, maildir_name=f"m{i}", date_utc=f"2026-09-0{i+1}T00:00:00Z")
+
+    page = search(db, SearchFilters(accounts=["personal"], limit=2, order="date_asc"))
+
+    assert len(page.messages) == 2
+    assert page.next_position is not None
+    assert page.next_position[0] == page.messages[-1]["date"]
+
+
+def test_next_position_is_none_once_the_last_page_is_reached(db):
+    for i in range(3):
+        _insert(db, maildir_name=f"m{i}", date_utc=f"2026-09-0{i+1}T00:00:00Z")
+
+    page = search(db, SearchFilters(accounts=["personal"], limit=5, order="date_asc"))
+
+    assert len(page.messages) == 3
+    assert page.next_position is None
+
+
+def test_next_position_is_none_for_relevance_order_even_with_more_rows(db):
+    for i in range(5):
+        _insert(db, maildir_name=f"m{i}", date_utc=f"2026-09-0{i+1}T00:00:00Z", subject="Findme")
+
+    page = search(db, SearchFilters(accounts=["personal"], q="Findme", limit=2, order="relevance"))
+
+    assert len(page.messages) == 2
+    assert page.next_position is None
+
+
+def test_after_returns_only_rows_strictly_past_the_given_position(db):
+    ids = [_insert(db, maildir_name=f"m{i}", date_utc=f"2026-09-0{i+1}T00:00:00Z") for i in range(5)]
+
+    first = search(db, SearchFilters(accounts=["personal"], limit=2, order="date_asc"))
+    assert [m["date"] for m in first.messages] == ["2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z"]
+
+    second = search(
+        db, SearchFilters(accounts=["personal"], limit=2, order="date_asc", after=first.next_position)
+    )
+    assert [m["date"] for m in second.messages] == ["2026-09-03T00:00:00Z", "2026-09-04T00:00:00Z"]
+
+
+def test_walking_the_full_range_by_cursor_visits_every_row_exactly_once(db):
+    for i in range(7):
+        _insert(db, maildir_name=f"m{i}", date_utc=f"2026-09-0{i+1}T00:00:00Z")
+
+    seen_dates = []
+    after = None
+    for _ in range(10):  # generous upper bound; the loop breaks on exhaustion
+        page = search(db, SearchFilters(accounts=["personal"], limit=3, order="date_asc", after=after))
+        seen_dates += [m["date"] for m in page.messages]
+        if page.next_position is None:
+            break
+        after = page.next_position
+
+    assert seen_dates == [f"2026-09-0{i+1}T00:00:00Z" for i in range(7)]
+
+
+def test_a_message_dropping_out_mid_walk_does_not_skip_the_next_one(db):
+    # The whole reason for a keyset cursor over an offset: a row leaving the
+    # result set between two page requests (marked read, deleted, ...)
+    # must not shift a later row out from under an offset-based position.
+    for i in range(5):
+        _insert(db, maildir_name=f"m{i}", date_utc=f"2026-09-0{i+1}T00:00:00Z", seen=False)
+
+    first = search(db, SearchFilters(accounts=["personal"], seen=False, limit=2, order="date_asc"))
+    assert [m["date"] for m in first.messages] == ["2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z"]
+
+    from mail_archive_server.store import update_flags
+    update_flags(db, id=compute_id("personal", "INBOX", "m0"), path="x", flags="S", seen=True, deleted=False)
+
+    second = search(
+        db, SearchFilters(accounts=["personal"], seen=False, limit=2, order="date_asc", after=first.next_position)
+    )
+
+    assert [m["date"] for m in second.messages] == ["2026-09-03T00:00:00Z", "2026-09-04T00:00:00Z"]
+
+
+def test_ties_on_the_same_date_utc_are_broken_by_id_consistently(db):
+    id_a = _insert(db, maildir_name="a", date_utc="2026-09-01T00:00:00Z")
+    id_b = _insert(db, maildir_name="b", date_utc="2026-09-01T00:00:00Z")
+    expected_order = sorted([id_a, id_b])
+
+    page = search(db, SearchFilters(accounts=["personal"], limit=1, order="date_asc"))
+    assert page.messages[0]["id"] == expected_order[0]
+
+    second = search(
+        db, SearchFilters(accounts=["personal"], limit=1, order="date_asc", after=page.next_position)
+    )
+    assert second.messages[0]["id"] == expected_order[1]
+    assert second.next_position is None
