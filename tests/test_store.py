@@ -443,6 +443,19 @@ def test_a_message_dropping_out_mid_walk_does_not_skip_the_next_one(db):
     assert [m["date"] for m in second.messages] == ["2026-09-03T00:00:00Z", "2026-09-04T00:00:00Z"]
 
 
+def test_total_stays_the_full_match_count_across_a_cursor_walk(db):
+    # Same meaning offset pagination already gives `total` -- it must not
+    # shrink to "remaining from this position" as a walk progresses.
+    for i in range(5):
+        _insert(db, maildir_name=f"m{i}", date_utc=f"2026-09-0{i+1}T00:00:00Z")
+
+    first = search(db, SearchFilters(accounts=["personal"], limit=2, order="date_asc"))
+    second = search(db, SearchFilters(accounts=["personal"], limit=2, order="date_asc", after=first.next_position))
+
+    assert first.total == 5
+    assert second.total == 5
+
+
 def test_ties_on_the_same_date_utc_are_broken_by_id_consistently(db):
     id_a = _insert(db, maildir_name="a", date_utc="2026-09-01T00:00:00Z")
     id_b = _insert(db, maildir_name="b", date_utc="2026-09-01T00:00:00Z")

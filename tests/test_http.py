@@ -223,8 +223,101 @@ def test_messages_relevance_order_without_q_is_400(env):
 def test_messages_response_envelope_shape(env):
     resp = env["client"].get("/messages", headers=auth("wildcard-secret"))
     body = resp.json()
-    assert set(["messages", "total", "limit", "offset", "accounts_searched", "index"]) <= set(body.keys())
+    assert set(["messages", "total", "limit", "offset", "next_cursor", "accounts_searched", "index"]) <= set(
+        body.keys()
+    )
     assert set(["last_indexed_at", "oldest_sync_at", "stale_seconds"]) <= set(body["index"].keys())
+
+
+def test_messages_relevance_order_has_no_next_cursor(env):
+    resp = env["client"].get("/messages", params={"order": "relevance", "q": "message"}, headers=auth("wildcard-secret"))
+    assert resp.status_code == 200
+    assert resp.json()["next_cursor"] is None
+
+
+def test_messages_cursor_with_offset_is_400(env):
+    resp = env["client"].get(
+        "/messages", params={"cursor": "whatever", "offset": "5"}, headers=auth("wildcard-secret")
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_cursor"
+
+
+def test_messages_cursor_with_relevance_order_is_400(env):
+    resp = env["client"].get(
+        "/messages", params={"cursor": "whatever", "order": "relevance", "q": "x"}, headers=auth("wildcard-secret")
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_cursor"
+
+
+def test_messages_malformed_cursor_is_400(env):
+    resp = env["client"].get("/messages", params={"cursor": "not-valid-base64!!"}, headers=auth("wildcard-secret"))
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_cursor"
+
+
+def test_messages_cursor_reused_with_different_filters_is_400(env):
+    from mail_archive_server.store import compute_id, insert_message
+
+    insert_message(
+        env["conn"], id=compute_id("personal", "INBOX", "extra"), account="personal", folder="INBOX",
+        path="/mail/personal/INBOX/cur/extra:2,S", maildir_name="extra", message_id="<extra@x>",
+        from_raw="a@b.com", from_addr="a@b.com", to_raw="c@d.com", cc_raw="", subject="Extra",
+        date_utc="2026-09-02T00:00:00Z", size_bytes=10, flags="", seen=False, deleted=False,
+        has_attachment=False, attachments=[], body_preview="", body="", indexed_at="2026-09-01T00:00:00Z",
+    )
+
+    first = env["client"].get(
+        "/messages", params={"order": "date_asc", "account": "personal", "limit": "1"},
+        headers=auth("wildcard-secret"),
+    )
+    cursor = first.json()["next_cursor"]
+    assert cursor is not None
+
+    resp = env["client"].get(
+        "/messages", params={"order": "date_asc", "account": "work", "cursor": cursor},
+        headers=auth("wildcard-secret"),
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_cursor"
+
+
+def test_messages_cursor_walk_visits_every_row_exactly_once(env):
+    from mail_archive_server.store import compute_id, insert_message
+
+    conn = env["conn"]
+    for i in range(5):
+        insert_message(
+            conn, id=compute_id("personal", "INBOX", f"extra{i}"), account="personal", folder="INBOX",
+            path=f"/mail/personal/INBOX/cur/extra{i}:2,S", maildir_name=f"extra{i}", message_id=f"<extra{i}@x>",
+            from_raw="a@b.com", from_addr="a@b.com", to_raw="c@d.com", cc_raw="", subject=f"Extra {i}",
+            date_utc=f"2026-09-0{i+1}T00:00:00Z", size_bytes=10, flags="", seen=False, deleted=False,
+            has_attachment=False, attachments=[], body_preview="", body="", indexed_at="2026-09-01T00:00:00Z",
+        )
+
+    ids_seen = []
+    dates_seen = []
+    expected_total = None
+    cursor = None
+    for _ in range(10):
+        params = {"order": "date_asc", "account": "personal", "limit": "2"}
+        if cursor:
+            params["cursor"] = cursor
+        resp = env["client"].get("/messages", params=params, headers=auth("personal-secret"))
+        assert resp.status_code == 200
+        body = resp.json()
+        expected_total = body["total"]
+        ids_seen += [m["id"] for m in body["messages"]]
+        dates_seen += [m["date"] for m in body["messages"]]
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+
+    assert len(ids_seen) == expected_total  # every row visited
+    assert len(ids_seen) == len(set(ids_seen))  # none visited twice
+    assert dates_seen == sorted(dates_seen)  # ascending order held across the whole walk
+    assert set(f"2026-09-0{i+1}T00:00:00Z" for i in range(5)) <= set(dates_seen)
 
 
 def test_post_sync_requires_wildcard_token(env):

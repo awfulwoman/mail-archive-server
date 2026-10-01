@@ -301,23 +301,26 @@ def search(conn: sqlite3.Connection, f: SearchFilters) -> SearchResult:
         where.append("m.attachments LIKE ?")
         params.append(f"%{f.attachment_name}%")
 
-    if f.after is not None and f.order in ("date_asc", "date_desc"):
-        after_date, after_id = f.after
-        op = ">" if f.order == "date_asc" else "<"
-        where.append(f"(m.date_utc {op} ? OR (m.date_utc = ? AND m.id {op} ?))")
-        params.extend([after_date, after_date, after_id])
-
     from_clause = "FROM messages m"
     if f.q:
         from_clause = "FROM messages m JOIN messages_fts ON messages_fts.id = m.id"
         where.append("messages_fts MATCH ?")
         params.append(f.q)
 
+    # `total` means "total matching these filters", the same stable meaning
+    # offset pagination already gives it -- computed before `after` below,
+    # which narrows only the page-fetching query, not the count.
     where_sql = " AND ".join(where) if where else "1=1"
-
     total = conn.execute(
         f"SELECT COUNT(*) AS n {from_clause} WHERE {where_sql}", params
     ).fetchone()["n"]
+
+    if f.after is not None and f.order in ("date_asc", "date_desc"):
+        after_date, after_id = f.after
+        op = ">" if f.order == "date_asc" else "<"
+        where.append(f"(m.date_utc {op} ? OR (m.date_utc = ? AND m.id {op} ?))")
+        params.extend([after_date, after_date, after_id])
+        where_sql = " AND ".join(where)
 
     # id is a tiebreaker in both the ORDER BY and the `after` clause above --
     # without it, two rows sharing a date_utc have no guaranteed stable

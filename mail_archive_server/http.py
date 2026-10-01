@@ -9,6 +9,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from mail_archive_server.config import Config, Token
+from mail_archive_server.cursor import InvalidCursor
+from mail_archive_server.cursor import decode as decode_cursor
+from mail_archive_server.cursor import encode as encode_cursor
 from mail_archive_server.indexer import reindex as run_reindex
 from mail_archive_server.pipeline import sync_and_reindex
 from mail_archive_server.store import (
@@ -172,6 +175,13 @@ async def get_messages(request: Request) -> JSONResponse:
     since = qp.get("since")
     until = qp.get("until")
 
+    cursor_token = qp.get("cursor")
+    offset_raw = qp.get("offset")
+    if cursor_token and offset_raw:
+        return _error(400, "invalid_cursor", "cursor and offset cannot be combined")
+    if cursor_token and order == "relevance":
+        return _error(400, "invalid_cursor", "cursor cannot be combined with order=relevance")
+
     filters = SearchFilters(
         accounts=accounts,
         q=q,
@@ -187,10 +197,22 @@ async def get_messages(request: Request) -> JSONResponse:
         seen=_parse_bool(qp.get("seen")),
         include_deleted=_parse_bool(qp.get("include_deleted")) or False,
         limit=int(qp.get("limit", "25")),
-        offset=int(qp.get("offset", "0")),
+        offset=int(offset_raw) if offset_raw else 0,
         order=order,
     )
+
+    if cursor_token:
+        try:
+            filters.after = decode_cursor(cursor_token, filters=filters)
+        except InvalidCursor as exc:
+            return _error(400, "invalid_cursor", str(exc))
+
     result = search(request.app.state.conn, filters)
+    next_cursor = (
+        encode_cursor(date_utc=result.next_position[0], id=result.next_position[1], filters=filters)
+        if result.next_position is not None
+        else None
+    )
 
     conn: sqlite3.Connection = request.app.state.conn
     last_indexed = [get_meta(conn, f"last_indexed_at:{a}") for a in accounts]
@@ -204,6 +226,7 @@ async def get_messages(request: Request) -> JSONResponse:
         "total": result.total,
         "limit": filters.limit,
         "offset": filters.offset,
+        "next_cursor": next_cursor,
         "accounts_searched": accounts,
         "index": {
             "last_indexed_at": max(last_indexed) if last_indexed else None,
