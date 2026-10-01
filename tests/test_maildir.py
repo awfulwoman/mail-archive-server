@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from mail_archive_server.maildir import discover_accounts, walk_account
+from mail_archive_server.maildir import discover_accounts, set_flags, walk_account
 
 
 def _make_folder(root: Path, *parts: str) -> Path:
@@ -112,3 +112,46 @@ def test_walk_account_records_path_mtime_size(tmp_path):
     assert m.path == f
     assert m.mtime == 1_700_000_123.0
     assert m.size == f.stat().st_size
+
+
+def test_set_flags_renames_a_cur_message_to_carry_the_new_flags(tmp_path):
+    inbox = _make_folder(tmp_path / "personal", "INBOX")
+    original = inbox / "cur" / "real.uniq:2,"
+    _touch(original)
+
+    new_path = set_flags(original, frozenset({"S"}))
+
+    assert not original.exists()
+    assert new_path == inbox / "cur" / "real.uniq:2,S"
+    assert new_path.exists()
+
+
+def test_set_flags_sorts_multiple_flags(tmp_path):
+    inbox = _make_folder(tmp_path / "personal", "INBOX")
+    original = inbox / "cur" / "real.uniq:2,"
+    _touch(original)
+
+    new_path = set_flags(original, frozenset({"S", "F"}))
+
+    assert new_path.name == "real.uniq:2,FS"
+
+
+def test_set_flags_moves_a_new_message_into_cur(tmp_path):
+    inbox = _make_folder(tmp_path / "personal", "INBOX")
+    original = inbox / "new" / "real.uniq"
+    _touch(original)
+
+    new_path = set_flags(original, frozenset({"S"}))
+
+    assert not original.exists()
+    assert new_path == inbox / "cur" / "real.uniq:2,S"
+
+
+def test_set_flags_preserves_existing_flags_not_being_changed(tmp_path):
+    inbox = _make_folder(tmp_path / "personal", "INBOX")
+    original = inbox / "cur" / "real.uniq:2,F"
+    _touch(original)
+
+    new_path = set_flags(original, frozenset({"F", "S"}))
+
+    assert new_path.name == "real.uniq:2,FS"

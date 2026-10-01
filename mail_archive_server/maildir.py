@@ -64,6 +64,23 @@ def _iter_folder_messages(folder_path: Path) -> Iterator[tuple[str, Path, frozen
             yield maildir_name, entry, flags, st.st_mtime, st.st_size
 
 
+def set_flags(path: Path, flags: frozenset[str]) -> Path:
+    """Renames a message file to carry exactly `flags`, Maildir's own
+    mechanism for flag changes (mail-archive-server#1's mark-read: the
+    service writes to its own Maildir directly, the same way mbsync
+    itself already does -- no raw IMAP STORE code needed). Any flag at
+    all means the message belongs in cur/, never new/ ("unseen by any
+    client") -- moved there if it's still in new/.
+    """
+    base, _ = _parse_cur_filename(path.name)
+    folder_dir = path.parent.parent
+    dest_dir = folder_dir / ("cur" if flags else path.parent.name)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    new_path = dest_dir / f"{base}:2,{''.join(sorted(flags))}"
+    path.rename(new_path)
+    return new_path
+
+
 def walk_account(account_root: Path, account: str) -> Iterator[MaildirMessage]:
     for folder, folder_path in _iter_mail_folders(account_root):
         for maildir_name, path, flags, mtime, size in _iter_folder_messages(folder_path):
