@@ -13,15 +13,18 @@ from mail_archive_server.cursor import InvalidCursor
 from mail_archive_server.cursor import decode as decode_cursor
 from mail_archive_server.cursor import encode as encode_cursor
 from mail_archive_server.indexer import reindex as run_reindex
+from mail_archive_server.maildir import set_flags
 from mail_archive_server.pipeline import sync_and_reindex
 from mail_archive_server.store import (
     SearchFilters,
     account_stats,
     folder_counts,
     get_message,
+    get_message_location,
     get_meta,
     known_accounts,
     search,
+    update_flags,
 )
 from mail_archive_server.timeutil import normalize_since, normalize_until, stale_seconds
 
@@ -248,6 +251,41 @@ async def get_message_detail(request: Request) -> JSONResponse:
     return JSONResponse(msg)
 
 
+async def post_mark_read(request: Request) -> JSONResponse:
+    """mail-archive-server#1: flip the message's own Maildir flags (the same
+    mechanism mbsync itself uses — no raw IMAP STORE code needed), update the
+    index immediately, then sync that one account so the flag propagates
+    upstream over IMAP too. Out-of-scope or unknown id -> 404, the same as
+    GET /messages/{id} — don't confirm existence of mail the token can't see.
+    """
+    token = _get_token(request)
+    if token is None:
+        return _error(401, "unauthorized", "missing or invalid bearer token")
+
+    id_ = request.path_params["id"]
+    conn: sqlite3.Connection = request.app.state.conn
+    msg = get_message(conn, id_)
+    if msg is None or not token.allows(msg["account"]):
+        return _error(404, "not_found", "no such message")
+
+    app_state = request.app.state
+    with app_state.indexing_lock:
+        app_state.indexing = True
+        try:
+            location = get_message_location(conn, id_)
+            new_flags = frozenset(location["flags"]) | {"S"}
+            new_path = set_flags(Path(location["path"]), new_flags)
+            update_flags(
+                conn, id=id_, path=str(new_path), flags="".join(sorted(new_flags)),
+                seen=True, deleted=location["deleted"],
+            )
+            sync_and_reindex(conn, app_state.config, account=msg["account"])
+        finally:
+            app_state.indexing = False
+
+    return JSONResponse({"id": id_, "account": msg["account"], "seen": True})
+
+
 def _do_reindex(app_state, maildir_path: Path, accounts: list[str] | None) -> None:
     with app_state.indexing_lock:
         app_state.indexing = True
@@ -270,14 +308,20 @@ async def post_reindex(request: Request) -> JSONResponse:
     return JSONResponse({"indexing": True}, status_code=202)
 
 
-def do_sync(app_state) -> None:
-    """Runs the full sync-then-reindex pipeline. Shared by the /sync handler and
-    main.py's background scheduler, under the same lock post_reindex uses — sync
-    and reindex must never run concurrently with each other."""
+def do_sync(app_state, account: str | None = None) -> None:
+    """Runs the sync-then-reindex pipeline, optionally scoped to one account
+    (mail-archive-server#1's on-demand sync). Shared by the /sync handler and
+    main.py's background scheduler, under the same lock post_reindex uses —
+    sync and reindex must never run concurrently with each other.
+
+    post_mark_read below needs the same mutual exclusion but can't call this:
+    it already holds indexing_lock itself (a plain threading.Lock, not
+    reentrant) for the flag-flip-then-sync to be one atomic unit, so it calls
+    sync_and_reindex directly instead of through this second acquisition."""
     with app_state.indexing_lock:
         app_state.indexing = True
         try:
-            sync_and_reindex(app_state.conn, app_state.config)
+            sync_and_reindex(app_state.conn, app_state.config, account=account)
         finally:
             app_state.indexing = False
 
@@ -289,7 +333,13 @@ async def post_sync(request: Request) -> JSONResponse:
     if token.accounts is not None:
         return _error(403, "sync_forbidden", "sync requires a wildcard-scoped token")
 
-    do_sync(request.app.state)
+    account = request.query_params.get("account")
+    if account is not None:
+        config: Config = request.app.state.config
+        if account not in config.imap_accounts:
+            return _error(400, "unknown_account", f"unknown account: {account}")
+
+    do_sync(request.app.state, account=account)
     return JSONResponse({"indexing": True}, status_code=202)
 
 
@@ -327,6 +377,7 @@ def create_app(
             Route("/folders", get_folders),
             Route("/messages", get_messages),
             Route("/messages/{id}", get_message_detail),
+            Route("/messages/{id}/read", post_mark_read, methods=["POST"]),
             Route("/reindex", post_reindex, methods=["POST"]),
             Route("/sync", post_sync, methods=["POST"]),
         ],

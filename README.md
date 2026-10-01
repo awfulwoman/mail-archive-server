@@ -117,9 +117,20 @@ GET  /accounts               accounts the token can see, with counts
 GET  /folders                folder counts, optionally ?account=
 GET  /messages                search — see below
 GET  /messages/{id}          one message including full body
-POST /sync                    sync (mbsync) then reindex, all configured accounts
+POST /messages/{id}/read     mark read — sets seen, syncs that account back upstream
+POST /sync                    sync (mbsync) then reindex; ?account= to scope to just one
 POST /reindex                 reindex only — no IMAP activity; ?account= for just one
 ```
+
+`POST /sync` and `POST /reindex` both require a wildcard-scoped token regardless
+of `?account=`. An unconfigured account name is a 400 `unknown_account`.
+
+`POST /messages/{id}/read` sets `seen=true` in the index immediately (no full
+reindex needed), flips the flag on the message's own Maildir file (the same
+mechanism mbsync itself uses — this service holds no raw IMAP write code), then
+triggers a sync of just that account so the flag reaches the real mailbox too.
+Scoped by the id's own account, same 404-not-403 rule as `GET /messages/{id}` —
+out-of-scope or unknown mail never confirms its own existence.
 
 `GET /messages` query parameters: `q`, `account` (repeatable, omit for all in
 scope), `exclude_account`, `from`, `to`, `subject`, `folder` (repeatable),

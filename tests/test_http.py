@@ -131,6 +131,53 @@ def test_message_detail_in_scope_returns_body(env):
     assert resp.json()["body"] == "body text"
 
 
+def test_mark_read_sets_seen_moves_the_file_and_syncs_only_that_account(env):
+    personal_inbox_new = env["maildir"] / "personal" / "INBOX" / "new"
+    personal_inbox_new.mkdir(parents=True, exist_ok=True)
+    _write_message(personal_inbox_new / "2.uniq", subject="Unseen message")
+    env["client"].post("/reindex", headers=auth("wildcard-secret"))
+
+    listing = env["client"].get(
+        "/messages", params={"account": "personal", "seen": "false"}, headers=auth("wildcard-secret")
+    ).json()
+    [msg] = listing["messages"]
+    assert msg["subject"] == "Unseen message"
+
+    resp = env["client"].post(f"/messages/{msg['id']}/read", headers=auth("wildcard-secret"))
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"id": msg["id"], "account": "personal", "seen": True}
+
+    detail = env["client"].get(f"/messages/{msg['id']}", headers=auth("wildcard-secret")).json()
+    assert detail["seen"] is True
+
+    # The file itself moved from new/ to cur/ with an S flag -- the same
+    # mechanism mbsync itself uses, not a flag recorded only in the index.
+    assert not list(personal_inbox_new.iterdir())
+    cur_dir = env["maildir"] / "personal" / "INBOX" / "cur"
+    assert [p.name for p in cur_dir.glob("2.uniq:2,*")] == ["2.uniq:2,S"]
+
+
+def test_mark_read_out_of_scope_account_404(env):
+    work_msg = env["client"].get("/messages", params={"account": "work"}, headers=auth("wildcard-secret")).json()
+    work_id = work_msg["messages"][0]["id"]
+
+    resp = env["client"].post(f"/messages/{work_id}/read", headers=auth("personal-secret"))
+
+    assert resp.status_code == 404
+
+
+def test_mark_read_unknown_id_404(env):
+    resp = env["client"].post("/messages/doesnotexist/read", headers=auth("wildcard-secret"))
+    assert resp.status_code == 404
+
+
+def test_mark_read_missing_auth_401(env):
+    resp = env["client"].post("/messages/doesnotexist/read")
+    assert resp.status_code == 401
+
+
 def test_reindex_requires_wildcard_token(env):
     resp = env["client"].post("/reindex", headers=auth("personal-secret"))
     assert resp.status_code == 403
@@ -480,3 +527,40 @@ def test_post_sync_runs_full_pipeline_and_picks_up_synced_mail(tmp_path):
     status = client.get("/status", headers=auth("wildcard-secret")).json()
     accounts = {a["name"]: a for a in status["accounts"]}
     assert accounts["personal"]["last_sync_ok"] is True
+
+
+def test_post_sync_with_account_syncs_only_that_one(tmp_path):
+    maildir = tmp_path / "maildir"
+    maildir.mkdir()
+    mbsync_bin = install_fake_mbsync(tmp_path)
+    (tmp_path / "maildir_path.txt").write_text(str(maildir))
+
+    config = load_config({
+        "MAIL_ARCHIVE_MAILDIR_PATH": str(maildir),
+        "MAIL_ARCHIVE_TOKENS__wildcard__SECRET": "wildcard-secret",
+        "MAIL_ARCHIVE_TOKENS__wildcard__ACCOUNTS": "*",
+        "MAIL_ARCHIVE_MBSYNC_BIN": str(mbsync_bin),
+        "MAIL_ARCHIVE_MBSYNCRC_PATH": str(tmp_path / "mbsyncrc"),
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__HOST": "imap.example.com",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__USERNAME": "u",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__PASSWORD": "p",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__work__HOST": "imap.work.com",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__work__USERNAME": "u2",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__work__PASSWORD": "p2",
+    })
+    conn = open_db(Path(":memory:"))
+    client = TestClient(create_app(config, conn, maildir))
+
+    resp = client.post("/sync", params={"account": "personal"}, headers=auth("wildcard-secret"))
+    assert resp.status_code == 202
+
+    status = client.get("/status", headers=auth("wildcard-secret")).json()
+    accounts = {a["name"]: a for a in status["accounts"]}
+    assert accounts["personal"]["last_sync_attempt_at"] is not None
+    assert accounts["work"]["last_sync_attempt_at"] is None
+
+
+def test_post_sync_unknown_account_400(env):
+    resp = env["client"].post("/sync", params={"account": "ghost"}, headers=auth("wildcard-secret"))
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "unknown_account"
