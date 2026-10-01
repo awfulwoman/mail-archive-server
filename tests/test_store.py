@@ -93,6 +93,22 @@ def test_get_message_unknown_id_returns_none(db):
     assert get_message(db, "doesnotexist") is None
 
 
+def test_get_message_location_returns_path_flags_and_deleted(db):
+    from mail_archive_server.store import get_message_location
+    id_ = _insert(db, maildir_name="m1")
+
+    location = get_message_location(db, id_)
+
+    assert location["path"] == "/mail/personal/INBOX/cur/m1:2,S"
+    assert location["flags"] == "S"
+    assert location["deleted"] is False
+
+
+def test_get_message_location_unknown_id_returns_none(db):
+    from mail_archive_server.store import get_message_location
+    assert get_message_location(db, "doesnotexist") is None
+
+
 def test_attachments_round_trip_as_list_of_dicts(db):
     atts = [{"filename": "a.pdf", "content_type": "application/pdf",
              "size_bytes": 10, "content_disposition": "attachment"}]

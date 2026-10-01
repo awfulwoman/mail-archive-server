@@ -202,6 +202,17 @@ def folder_counts(conn: sqlite3.Connection, accounts: list[str]) -> list[dict]:
     return [{"account": r["account"], "folder": r["folder"], "messages": r["messages"]} for r in rows]
 
 
+def get_message_location(conn: sqlite3.Connection, id: str) -> dict | None:
+    """The filesystem/flag fields `get_message`'s public shape doesn't
+    expose -- for mark-read's own Maildir write (mail-archive-server#1),
+    not for a caller to render.
+    """
+    row = conn.execute("SELECT path, flags, deleted FROM messages WHERE id=?", (id,)).fetchone()
+    if row is None:
+        return None
+    return {"path": row["path"], "flags": row["flags"] or "", "deleted": bool(row["deleted"])}
+
+
 def get_message(conn: sqlite3.Connection, id: str) -> dict | None:
     row = conn.execute("SELECT * FROM messages WHERE id=?", (id,)).fetchone()
     if row is None:
