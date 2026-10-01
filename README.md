@@ -126,7 +126,20 @@ scope), `exclude_account`, `from`, `to`, `subject`, `folder` (repeatable),
 `exclude_folder` (repeatable, default `Trash,Junk`), `since`/`until` (a bare
 `YYYY-MM-DD` is inclusive of the whole day), `has_attachment`, `attachment_name`,
 `seen`, `include_deleted`, `limit` (default 25, max 200), `offset`, `order`
-(`date_desc` default, `date_asc`, or `relevance` — the last requires `q`).
+(`date_desc` default, `date_asc`, or `relevance` — the last requires `q`), and
+`cursor`.
+
+**Paging a range without skipping or repeating messages.** `offset` shifts
+whenever the result set changes between two requests — a message marked read,
+flagged deleted, or newly arrived mid-walk can skip or repeat a row. For
+`order=date_asc`/`date_desc`, the response always includes `next_cursor`: an
+opaque token naming the last row returned, or `null` once the range is
+exhausted (never included for `order=relevance`, which has no stable row
+order to key off). Pass it back as `cursor` to get the next page, in the same
+order and filters — a cursor sent with `offset`, with `order=relevance`,
+malformed, or under different filters than it was issued with, is a 400
+`invalid_cursor`. The server builds it; never construct one. A cursor is
+stateless — reusable from another process, another day.
 
 ## Development
 
