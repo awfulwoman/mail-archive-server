@@ -89,6 +89,27 @@ def test_sync_and_reindex_one_account_failing_still_indexes_the_other(tmp_path, 
     assert found.messages[0]["account"] == "personal"
 
 
+def test_sync_and_reindex_with_an_account_filter_only_syncs_that_account(tmp_path, db):
+    config, maildir = _setup(tmp_path, {
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__HOST": "imap.example.com",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__USERNAME": "u",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__personal__PASSWORD": "p",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__work__HOST": "imap.work.com",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__work__USERNAME": "u2",
+        "MAIL_ARCHIVE_IMAP_ACCOUNTS__work__PASSWORD": "p2",
+    })
+
+    result = sync_and_reindex(db, config, account="personal")
+
+    assert set(result.sync.keys()) == {"personal"}
+    assert set(result.index.keys()) == {"personal"}
+    assert get_meta(db, "last_sync_attempt_at:personal") is not None
+    assert get_meta(db, "last_sync_attempt_at:work") is None  # other account untouched
+
+    invoked_log = (tmp_path / "fake_mbsync_markers" / "invoked.log")
+    assert invoked_log.read_text().strip().splitlines() == ["personal"]
+
+
 def test_sync_and_reindex_with_no_imap_accounts_only_reindexes(tmp_path, db):
     config, maildir = _setup(tmp_path, {})
     account_dir = maildir / "readonly" / "INBOX"
