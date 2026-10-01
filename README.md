@@ -117,7 +117,7 @@ GET  /accounts               accounts the token can see, with counts
 GET  /folders                folder counts, optionally ?account=
 GET  /messages                search — see below
 GET  /messages/{id}          one message including full body
-POST /messages/{id}/read     mark read — sets seen, syncs that account back upstream
+POST /messages/{id}/read     mark read — local only for now, see below
 POST /sync                    sync (mbsync) then reindex; ?account= to scope to just one
 POST /reindex                 reindex only — no IMAP activity; ?account= for just one
 ```
@@ -125,12 +125,16 @@ POST /reindex                 reindex only — no IMAP activity; ?account= for j
 `POST /sync` and `POST /reindex` both require a wildcard-scoped token regardless
 of `?account=`. An unconfigured account name is a 400 `unknown_account`.
 
-`POST /messages/{id}/read` sets `seen=true` in the index immediately (no full
-reindex needed), flips the flag on the message's own Maildir file (the same
-mechanism mbsync itself uses — this service holds no raw IMAP write code), then
-triggers a sync of just that account so the flag reaches the real mailbox too.
-Scoped by the id's own account, same 404-not-403 rule as `GET /messages/{id}` —
-out-of-scope or unknown mail never confirms its own existence.
+`POST /messages/{id}/read` sets `seen=true` in the index immediately and flips
+the flag on the message's own Maildir file (the same mechanism mbsync itself
+uses). **It does not yet reach the real mailbox over IMAP** — every channel is
+`Sync Pull` (never write to the source mailbox), so there's currently no
+direction for a local flag change to propagate upstream; the response says so
+(`"upstream_synced": false`). Reaching the real mailbox needs either a narrow
+`PushFlags` addition to the channel config or a direct IMAP `STORE` call,
+neither built yet. Scoped by the id's own account, same 404-not-403 rule as
+`GET /messages/{id}` — out-of-scope or unknown mail never confirms its own
+existence.
 
 `GET /messages` query parameters: `q`, `account` (repeatable, omit for all in
 scope), `exclude_account`, `from`, `to`, `subject`, `folder` (repeatable),

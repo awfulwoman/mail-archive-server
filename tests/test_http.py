@@ -131,7 +131,7 @@ def test_message_detail_in_scope_returns_body(env):
     assert resp.json()["body"] == "body text"
 
 
-def test_mark_read_sets_seen_moves_the_file_and_syncs_only_that_account(env):
+def test_mark_read_sets_seen_and_moves_the_file_locally(env):
     personal_inbox_new = env["maildir"] / "personal" / "INBOX" / "new"
     personal_inbox_new.mkdir(parents=True, exist_ok=True)
     _write_message(personal_inbox_new / "2.uniq", subject="Unseen message")
@@ -147,7 +147,7 @@ def test_mark_read_sets_seen_moves_the_file_and_syncs_only_that_account(env):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"id": msg["id"], "account": "personal", "seen": True}
+    assert body == {"id": msg["id"], "account": "personal", "seen": True, "upstream_synced": False}
 
     detail = env["client"].get(f"/messages/{msg['id']}", headers=auth("wildcard-secret")).json()
     assert detail["seen"] is True

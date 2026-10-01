@@ -253,10 +253,18 @@ async def get_message_detail(request: Request) -> JSONResponse:
 
 async def post_mark_read(request: Request) -> JSONResponse:
     """mail-archive-server#1: flip the message's own Maildir flags (the same
-    mechanism mbsync itself uses — no raw IMAP STORE code needed), update the
-    index immediately, then sync that one account so the flag propagates
-    upstream over IMAP too. Out-of-scope or unknown id -> 404, the same as
-    GET /messages/{id} — don't confirm existence of mail the token can't see.
+    mechanism mbsync itself uses) and update the index immediately. Local
+    only, for now: it does NOT yet reach the real mailbox over IMAP.
+
+    generate_mbsyncrc's channels are `Sync Pull` (6ce6f93, "never write to
+    the source mailbox") -- Pull propagates far->near only, so triggering a
+    sync here would do nothing for a locally-set flag, and whether it could
+    actively revert it back from the still-unread remote copy is unverified.
+    Reaching the real mailbox needs either a narrow `PushFlags` channel
+    addition (keeping New/Gone pull-only) or a direct IMAP STORE call,
+    neither implemented yet -- see the follow-up issue. Out-of-scope or
+    unknown id -> 404, same as GET /messages/{id}: don't confirm existence
+    of mail the token can't see.
     """
     token = _get_token(request)
     if token is None:
@@ -279,11 +287,10 @@ async def post_mark_read(request: Request) -> JSONResponse:
                 conn, id=id_, path=str(new_path), flags="".join(sorted(new_flags)),
                 seen=True, deleted=location["deleted"],
             )
-            sync_and_reindex(conn, app_state.config, account=msg["account"])
         finally:
             app_state.indexing = False
 
-    return JSONResponse({"id": id_, "account": msg["account"], "seen": True})
+    return JSONResponse({"id": id_, "account": msg["account"], "seen": True, "upstream_synced": False})
 
 
 def _do_reindex(app_state, maildir_path: Path, accounts: list[str] | None) -> None:
