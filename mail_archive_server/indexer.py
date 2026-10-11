@@ -25,14 +25,21 @@ class AccountIndexStats:
 def reindex_account(conn: sqlite3.Connection, account_root: Path, account: str) -> AccountIndexStats:
     stats = AccountIndexStats()
     existing = ids_for_account(conn, account)
+    id_by_path = {path: id_ for id_, path in existing.items()}
     seen_ids: set[str] = set()
 
     for msg in walk_account(account_root, account):
         id_ = compute_id(msg.account, msg.folder, msg.maildir_name)
-        seen_ids.add(id_)
         path_str = str(msg.path)
         flags_str = "".join(sorted(msg.flags))
 
+        if id_ not in existing and path_str in id_by_path:
+            # Same file under an id computed from an earlier name (mbsync's
+            # new/ 'uniq:2,' renamed to cur/ 'uniq:2,S' by mark-read). Keep
+            # the published id rather than inserting a duplicate path.
+            seen_ids.add(id_by_path[path_str])
+            continue
+        seen_ids.add(id_)
         if id_ not in existing:
             raw = msg.path.read_bytes()
             parsed = parse_message(raw)

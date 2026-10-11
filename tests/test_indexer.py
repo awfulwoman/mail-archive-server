@@ -180,3 +180,30 @@ def test_reindex_with_explicit_accounts_only_touches_those(tmp_path, db):
     stats = reindex(db, root, accounts=["personal"])
     assert set(stats.keys()) == {"personal"}
     assert search(db, SearchFilters(accounts=["personal", "work"])).total == 1
+
+
+def test_reindex_survives_new_message_marked_read_in_place(tmp_path, db):
+    """mbsync drops unseen mail in new/ as 'uniq:2,'; mark-read renames it to
+    cur/'uniq:2,S'. The id was computed from the new/ name, so the walker's id
+    no longer matches the row -- but the path does. Must not crash on the
+    UNIQUE(path) constraint or duplicate the message."""
+    root = tmp_path / "maildir"
+    inbox = _make_folder(root / "personal", "INBOX")
+    unseen = inbox / "new" / "1.uniq:2,"
+    _write_message(unseen, subject="Unread")
+    reindex_account(db, root / "personal", "personal")
+    old_id = compute_id("personal", "INBOX", "1.uniq:2,")
+
+    read = inbox / "cur" / "1.uniq:2,S"
+    unseen.rename(read)
+    # what mark-read does to the row
+    db.execute("UPDATE messages SET path=?, flags='S', seen=1 WHERE id=?", (str(read), old_id))
+    db.commit()
+
+    stats = reindex_account(db, root / "personal", "personal")
+
+    assert stats.parsed == 0
+    assert stats.deleted == 0
+    result = search(db, SearchFilters(accounts=["personal"]))
+    assert result.total == 1
+    assert result.messages[0]["id"] == old_id
